@@ -1,6 +1,7 @@
 import { describe, expect, test, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import { App, startFailureMessage } from "./App";
+import { coachPrompt, GENERAL_PROMPT } from "./lib/persona";
 import { WorkerError } from "./lib/transport";
 
 // jsdom has no IndexedDB, so the store is faked.
@@ -15,18 +16,31 @@ vi.mock("./lib/tokenStore", () => ({
 
 // Lets a test decide how starting a conversation fails, without a microphone or socket.
 let startFails: unknown = null;
+let createdPrompts: string[] = [];
+let createdDeps: Record<string, unknown>[] = [];
+let stopCount = 0;
 vi.mock("./lib/pipeline/createSession", () => ({
-  createSession: () => ({
-    isRunning: false,
-    mouthSpectrum: () => null,
-    start: () => (startFails ? Promise.reject(startFails) : Promise.resolve()),
-    stop: () => Promise.resolve(),
-  }),
+  createSession: (_engine: unknown, deps: { prompt: string }) => {
+    createdPrompts.push(deps.prompt);
+    createdDeps.push(deps);
+    return {
+      isRunning: false,
+      mouthSpectrum: () => null,
+      start: () => (startFails ? Promise.reject(startFails) : Promise.resolve()),
+      stop: () => {
+        stopCount += 1;
+        return Promise.resolve();
+      },
+    };
+  },
 }));
 
 beforeEach(() => {
   startFails = null;
   stored = "";
+  createdPrompts = [];
+  createdDeps = [];
+  stopCount = 0;
   // With a token the page asks the Worker for its engine; tests must not reach the network.
   vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 404 }));
 });
@@ -78,6 +92,64 @@ test("no settings toggle while the gate is the page", async () => {
     expect(screen.getByLabelText(/access token/i)).toBeTruthy();
   });
   expect(screen.queryByRole("button", { name: /settings|close/i })).toBeNull();
+});
+
+test("the theme dropdown is on screen with the token field and defaults to general conversation", async () => {
+  render(<App />);
+
+  const theme = (await screen.findByLabelText("Тема")) as HTMLSelectElement;
+  expect(theme.value).toBe("general");
+  expect(screen.getByRole("option", { name: "Общая беседа" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "Тренер интеллектуальных игр" })).toBeTruthy();
+});
+
+test("a new conversation sends the theme chosen in settings", async () => {
+  stored = "vibe_test";
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /start conversation/i }));
+  await waitFor(() => expect(createdPrompts).toEqual([GENERAL_PROMPT]));
+
+  cleanup();
+  createdPrompts = [];
+  createdDeps = [];
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /settings/i }));
+  fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "coach" } });
+  fireEvent.click(screen.getByRole("button", { name: /start conversation/i }));
+
+  await waitFor(() => expect(createdPrompts).toEqual([coachPrompt("school")]));
+  expect(createdDeps[0]).toMatchObject({ llm: "claude-sonnet-5-5", language: "ru" });
+});
+
+test("the audience choice belongs to the coach and reaches its prompt", async () => {
+  stored = "vibe_test";
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /settings/i }));
+  expect(screen.queryByLabelText("Аудитория"), "the general role has no audience").toBeNull();
+
+  fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "coach" } });
+  fireEvent.change(screen.getByLabelText("Аудитория"), { target: { value: "students" } });
+  fireEvent.click(screen.getByRole("button", { name: /start conversation/i }));
+
+  await waitFor(() => expect(createdPrompts).toEqual([coachPrompt("students")]));
+});
+
+test("changing the theme during a conversation does not end it", async () => {
+  stored = "vibe_test";
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /start conversation/i }));
+  await screen.findByRole("button", { name: /end conversation/i });
+  const stops = stopCount;
+
+  fireEvent.click(screen.getByRole("button", { name: /settings/i }));
+  fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "coach" } });
+
+  expect(stopCount).toBe(stops);
+  expect(screen.getByRole("button", { name: /end conversation/i })).toBeTruthy();
 });
 
 test("saving a token closes the drawer instead of leaving it on 'close'", async () => {

@@ -7,6 +7,7 @@ import { createTransport, WorkerError } from "./lib/transport";
 import { loadConfig } from "./lib/config";
 import type { TurnMetrics } from "./lib/types";
 import { loadToken, saveToken } from "./lib/tokenStore";
+import { AUDIENCES, roleFor, THEMES, type AudienceId, type Role, type ThemeId } from "./lib/persona";
 import { Recorder, fixtureFilename, toFixtureJson } from "./lib/recorder";
 import { Waterfall } from "./scene/Waterfall";
 import { StageBreakdown } from "./scene/StageBreakdown";
@@ -67,6 +68,8 @@ export function App() {
   // which, for a product about honest timings, is the whole point.
   const [metrics, setMetrics] = useState<TurnMetrics | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [themeId, setThemeId] = useState<ThemeId>("general");
+  const [audience, setAudience] = useState<AudienceId>("school");
   const [talking, setTalking] = useState(false);
   /** Who ended the last conversation, so the transport row can say so. */
   const [endedBy, setEndedBy] = useState<"user" | "agent" | "error" | null>(null);
@@ -104,7 +107,7 @@ export function App() {
   /** The engine the last start attempt used, so its failure is worded for that engine. */
   const engineRef = useRef<Engine>("elevenlabs");
 
-  const sessionDeps = useMemo((): SessionDeps => {
+  const sessionDeps = useMemo((): Omit<SessionDeps, keyof Role> => {
     return {
       bus,
       transport,
@@ -171,7 +174,9 @@ export function App() {
       const current = await transport.engine().catch(() => "elevenlabs" as const);
       setEngine(current);
       engineRef.current = current;
-      const session = createSession(current, sessionDeps);
+      // Read here, not on sessionDeps: that memo's identity tears a live conversation
+      // down, and a theme chosen mid-call waits until the next start.
+      const session = createSession(current, { ...sessionDeps, ...roleFor(themeId, audience) });
       sessionRef.current = session;
       await session.start();
       setTalking(true);
@@ -224,6 +229,10 @@ export function App() {
         {tokenReady && (config.offline || settingsOpen) && (
           <TokenGate
             token={storedToken}
+            themeId={themeId}
+            onTheme={setThemeId}
+            audience={audience}
+            onAudience={setAudience}
             onChange={(next) => {
               setStoredToken(next);
               setSettingsOpen(false);
@@ -292,9 +301,17 @@ export function App() {
 function TokenGate({
   token,
   onChange,
+  themeId,
+  onTheme,
+  audience,
+  onAudience,
 }: {
   token: string;
   onChange: (next: string) => void;
+  themeId: ThemeId;
+  onTheme: (next: ThemeId) => void;
+  audience: AudienceId;
+  onAudience: (next: AudienceId) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -355,7 +372,43 @@ function TokenGate({
         </form>
       )}
 
+      <div className="settings-block">
+        <label htmlFor="theme">Тема</label>
+        <select
+          id="theme"
+          value={themeId}
+          onChange={(e) => {
+            const next = THEMES.find((theme) => theme.id === e.target.value);
+            if (next) onTheme(next.id);
+          }}
+        >
+          {THEMES.map((theme) => (
+            <option key={theme.id} value={theme.id}>
+              {theme.label}
+            </option>
+          ))}
+        </select>
+      </div>
 
+      {themeId === "coach" && (
+        <div className="settings-block">
+          <label htmlFor="audience">Аудитория</label>
+          <select
+            id="audience"
+            value={audience}
+            onChange={(e) => {
+              const next = AUDIENCES.find((a) => a.id === e.target.value);
+              if (next) onAudience(next.id);
+            }}
+          >
+            {AUDIENCES.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
     </div>
   );
 }
