@@ -1,13 +1,14 @@
 import { expect, test, vi } from "vitest";
 import { AgentSession } from "./agentSession";
-import { SYSTEM_PROMPT } from "../persona";
 import { EventBus } from "../events";
+import type { ThemeId } from "../persona";
 import type { PipelineEvent, TurnMetrics } from "../types";
 
 /** Captures the callbacks the SDK would have received, so they can be fired by hand. */
 const handlers: Record<string, (arg?: unknown) => void> = {};
 /** What the session asked the SDK for, so the handshake itself can be asserted on. */
 let startOptions: Record<string, unknown> = {};
+const contextualUpdates: [string, unknown][] = [];
 
 vi.mock("@elevenlabs/client", () => ({
   Conversation: {
@@ -17,6 +18,7 @@ vi.mock("@elevenlabs/client", () => ({
         if (typeof value === "function") handlers[key] = value as () => void;
       }
       return {
+        sendContextualUpdate: (text: string, options: unknown) => contextualUpdates.push([text, options]),
         endSession: async () => {},
         getOutputVolume: () => 0,
         getOutputByteFrequencyData: () => new Uint8Array(1024),
@@ -25,22 +27,25 @@ vi.mock("@elevenlabs/client", () => ({
   },
 }));
 
-async function harness() {
+async function harness(prompt = "unused", theme: ThemeId = "general") {
   const bus = new EventBus();
   const events: PipelineEvent[] = [];
   bus.on((e) => events.push(e));
 
   const turns: TurnMetrics[] = [];
+  const agentToken = vi.fn(async () => ({ token: "t", agentId: "a" }));
 
   const session = new AgentSession({
     bus,
-    transport: { agentToken: async () => ({ token: "t", agentId: "a" }) } as never,
+    transport: { agentToken } as never,
     onTurn: (m) => turns.push(m),
     onEnded: () => {},
+    prompt,
+    theme,
   });
 
   await session.start();
-  return { session, events, turns };
+  return { session, events, turns, agentToken };
 }
 
 const lanes = (events: PipelineEvent[], type: "stage-start" | "stage-end") =>
@@ -90,11 +95,91 @@ test("a disconnect closes every open lane", async () => {
   expect(closed).toContain("playback");
 });
 
-test("the role is sent with the handshake, not left to the agent's own prompt", async () => {
-  await harness();
+test("the handshake sends the prompt the session was given", async () => {
+  await harness("theme for this start");
 
   const overrides = startOptions.overrides as
     | { agent?: { prompt?: { prompt?: string } } }
     | undefined;
-  expect(overrides?.agent?.prompt?.prompt).toBe(SYSTEM_PROMPT);
+  expect(overrides?.agent?.prompt?.prompt).toBe("theme for this start");
+});
+
+test("the handshake sends the role's model, language and recogniser hints", async () => {
+  const session = new AgentSession({
+    bus: new EventBus(),
+    transport: { agentToken: async () => ({ token: "t", agentId: "a" }) } as never,
+    onTurn: () => {},
+    onEnded: () => {},
+    theme: "coach",
+    prompt: "coach",
+    llm: "claude-sonnet-5-5",
+    language: "ru",
+    asrKeywords: ["ЧГК", "Брейн-ринг"],
+  });
+  await session.start();
+
+  expect(startOptions.overrides).toEqual({
+    agent: { prompt: { prompt: "coach", llm: "claude-sonnet-5-5" }, language: "ru" },
+    asr: { keywords: ["ЧГК", "Брейн-ринг"] },
+  });
+});
+
+test("a role without a model or language sends neither, so an agent that forbids them still connects", async () => {
+  await harness("general");
+
+  expect(startOptions.overrides).toEqual({ agent: { prompt: { prompt: "general" } } });
+});
+
+test("the session's functions become client tools the agent calls by name", async () => {
+  const run = vi.fn(async (args: Record<string, unknown>) => `got ${args.skill}`);
+  const session = new AgentSession({
+    bus: new EventBus(),
+    transport: { agentToken: async () => ({ token: "t", agentId: "a" }) } as never,
+    onTurn: () => {},
+    onEnded: () => {},
+    theme: "coach",
+    prompt: "coach",
+    functions: [{ name: "find_training_question", description: "", parameters: {}, run }],
+  });
+  await session.start();
+
+  const tools = startOptions.clientTools as Record<string, (p: unknown) => Promise<string>>;
+  expect(await tools.find_training_question({ skill: "replacement" })).toBe("got replacement");
+});
+
+test("knowledge for the person's words goes to the agent as one replaceable contextual update", async () => {
+  contextualUpdates.length = 0;
+  const knowledgeFor = vi.fn((words: string) => (words.includes("фальстарт") ? "## Брейн-ринг: фальстарт" : null));
+  const session = new AgentSession({
+    bus: new EventBus(),
+    transport: { agentToken: async () => ({ token: "t", agentId: "a" }) } as never,
+    onTurn: () => {},
+    onEnded: () => {},
+    theme: "coach",
+    prompt: "coach",
+    knowledgeFor,
+  });
+  await session.start();
+
+  handlers.onMessage?.({ message: "Что такое фальстарт?", source: "user" } as never);
+  handlers.onMessage?.({ message: "Привет", source: "user" } as never);
+  handlers.onMessage?.({ message: "Фальстарт — это ответ до сигнала.", source: "ai" } as never);
+
+  expect(knowledgeFor.mock.calls.map((c) => c[0]), "only the person's words are searched").toEqual([
+    "Что такое фальстарт?",
+    "Привет",
+  ]);
+  expect(contextualUpdates).toEqual([["## Брейн-ринг: фальстарт", { contextId: "knowledge" }]]);
+});
+
+test("without functions no client tools are passed, leaving the SDK's own default", async () => {
+  await harness();
+
+  expect(startOptions).not.toHaveProperty("clientTools");
+});
+
+test("the token is minted for the theme's agent, which carries that theme's knowledge", async () => {
+  const { agentToken } = await harness("unused", "coach");
+
+  expect(agentToken).toHaveBeenCalledWith("coach");
 });

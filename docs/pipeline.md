@@ -64,6 +64,46 @@ role it opened with, so switching roles means a new session. And the agent must 
 override: with it disallowed the server closes the connection instead of ignoring the
 field, which reaches the page as a dropped conversation rather than an error about prompts.
 
+Each theme is a role in `persona.ts`: the prompt, plus — for the coach — the model
+(`prompt.llm`), the language and up to 50 ASR keywords. A field the role leaves unset is
+not sent, because the model and the language drop the connection like the prompt does when
+the agent does not allow them; ASR keywords alone are ignored silently. So the coach's
+agent must allow the prompt, LLM and language overrides, and ASR keywords for the hints to
+count. With `COACH_AGENT_ID` unset that agent is `AGENT_ID`.
+
+The knowledge base, its RAG limits and the temperature stay on the agent: the SDK has no
+typed field for the first and the agent offers no override for the last two. So a theme
+with knowledge of its own runs on
+an agent of its own: the page sends the theme to `/agent/token`, and the Worker mints for
+`COACH_AGENT_ID` when it is set and for `AGENT_ID` otherwise. RAG puts only the chunks
+nearest each turn into context, bounded by `max_documents_length`,
+`max_retrieved_rag_chunks_count` and `max_vector_distance` on that agent — that, not the
+prompt, is what keeps a large corpus out of the context window. Deepgram has no knowledge
+base, so there the coach answers without one. What goes into it: [knowledge](knowledge.md).
+
+## Training questions
+
+Before a coach session opens, the page draws one question per skill from `/question` and
+puts them into the prompt under `# Questions for this session`; a draw that fails or takes
+over five seconds is left out rather than holding up the start. That list needs nothing
+on the agent beyond the prompt override, so it works for anyone holding an interview key.
+
+Past the list, the coach plays real questions from gotquestions.online through one function,
+`find_training_question` ([`trainingQuestion.ts`](../src/lib/trainingQuestion.ts)), which skips
+the questions already in the list. The model
+picks the skill — `replacement`, `homogeneous` or `any`; the page adds the audience from its
+dropdown and the ids already played, and posts to the Worker's `/question`, which reads a
+pack page from its audience's pool and keeps the questions that can be played by voice at
+that level ([`worker/questions.js`](../worker/questions.js)). Nothing is stored: the site
+is read live, behind a day of edge cache.
+
+On ElevenLabs the function runs as a client tool, matched **by name** to a tool defined on
+the agent — the SDK only supplies the handler, so without that tool on the agent the model
+never calls it. Deepgram receives the full definition in `Settings`. Either way a failure
+returns as text telling the model to compose a question itself, by the recipes in the
+knowledge base; a thrown error would surface as a stage error instead. The tool call sits
+inside the `llm` lane: the lane stays open until the reply audio starts.
+
 ## Backup engine: Deepgram
 
 When ElevenLabs is down, a key can be switched to [Deepgram's Voice Agent

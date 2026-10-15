@@ -113,6 +113,15 @@ conversation, so a switch applies to the next one.
 A key mints only for its own engine: `/agent/token` answers `403` to a Deepgram key and
 `/deepgram-token` to an ElevenLabs one.
 
+## Training questions
+
+`POST /question` with `{skill, audience, exclude}` answers one question from
+gotquestions.online for the coach, on either engine: `{id, text, answer, zachet, comment,
+takePercent, url}`, `null` when no question in the packs tried fits — not `404`, which
+the page reads as a Worker deployed without the route — and `502` when the site fails. The audience picks the pack pool and the band of take rates; the pools are in
+[`questions.js`](questions.js). At most two pack pages are read per call, each cached at
+the edge for a day.
+
 `DEEPGRAM_API_KEY` is a Worker secret. The grant endpoint needs a key with at least the
 Member role; a Default key gets `403` and the page reports the start as failed. The LLM and
 the voice are Deepgram-managed, so no other provider key is involved.
@@ -126,7 +135,7 @@ Cloudflare location and are approximate; the exact counting is `AddressGuard`'s.
 |---|---|---|
 | `SIGNIN_LIMIT` / `SIGNIN_IP_LIMIT` | address / caller IP | 5 / 10 |
 | `VERIFY_LIMIT` / `VERIFY_IP_LIMIT` | address / caller IP | 10 / 20 |
-| `TOKEN_KEY_LIMIT` | hash of the key; minting and `/engine` counted apart | 6 |
+| `TOKEN_KEY_LIMIT` | hash of the key; minting, `/engine` and `/question` counted apart | 6 |
 | `TOKEN_IP_LIMIT` | caller IP, checked before the key is looked up | 30 |
 
 Over the limit is `429`. The token limits are approximate (Cloudflare Rate Limiting counts asynchronously, so a burst can get one or two past six); the exact counter guards sign-in only.
@@ -144,3 +153,6 @@ A key for local runs goes into the local KV:
 `wrangler kv key put --binding KEYS --local "key:vibe_dev" '{"engine":"deepgram","expiresAt":<ms>}'`.
 
 `wrangler dev` → http://localhost:8787
+
+Or `npm run dev:local` from the repo root, which also sets up the coach's agent and points
+the page at this Worker ([deploy](../docs/deploy.md)).

@@ -6,6 +6,10 @@ compatibility_date = "2026-08-05"
 # The ElevenLabs Agent this page talks to. Not a secret: a session token is still
 # required, and that is minted server-side.
 AGENT_ID = "agent_6701kzf2723mf3dtp7ben1j5dczt"
+# The coach theme's own agent, carrying its knowledge base. Unset, the coach runs on
+# AGENT_ID with no knowledge of its own. Either way the agent must allow the prompt, LLM
+# and language overrides, or the coach's call drops (docs/pipeline.md).
+# COACH_AGENT_ID = "agent_..."
 # Who may call the Worker from a browser: the deployed frontend on GitHub Pages
 # plus local development. Origins include the scheme and no trailing slash.
 # :5173 is the dev server, :4173 is `vite preview`, where the production build is

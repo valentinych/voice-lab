@@ -1,6 +1,8 @@
 import { describe, expect, test, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import { App, startFailureMessage } from "./App";
+import { coachPrompt, GENERAL_PROMPT } from "./lib/persona";
+import type { ClientFunction } from "./lib/pipeline/session";
 import { WorkerError } from "./lib/transport";
 
 // jsdom has no IndexedDB, so the store is faked.
@@ -15,18 +17,34 @@ vi.mock("./lib/tokenStore", () => ({
 
 // Lets a test decide how starting a conversation fails, without a microphone or socket.
 let startFails: unknown = null;
+let createdPrompts: string[] = [];
+let createdThemes: string[] = [];
+let createdDeps: Record<string, unknown>[] = [];
+let stopCount = 0;
 vi.mock("./lib/pipeline/createSession", () => ({
-  createSession: () => ({
-    isRunning: false,
-    mouthSpectrum: () => null,
-    start: () => (startFails ? Promise.reject(startFails) : Promise.resolve()),
-    stop: () => Promise.resolve(),
-  }),
+  createSession: (_engine: unknown, deps: { prompt: string; theme: string }) => {
+    createdPrompts.push(deps.prompt);
+    createdThemes.push(deps.theme);
+    createdDeps.push(deps);
+    return {
+      isRunning: false,
+      mouthSpectrum: () => null,
+      start: () => (startFails ? Promise.reject(startFails) : Promise.resolve()),
+      stop: () => {
+        stopCount += 1;
+        return Promise.resolve();
+      },
+    };
+  },
 }));
 
 beforeEach(() => {
   startFails = null;
   stored = "";
+  createdPrompts = [];
+  createdThemes = [];
+  createdDeps = [];
+  stopCount = 0;
   // With a token the page asks the Worker for its engine; tests must not reach the network.
   vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 404 }));
 });
@@ -78,6 +96,117 @@ test("no settings toggle while the gate is the page", async () => {
     expect(screen.getByLabelText(/access token/i)).toBeTruthy();
   });
   expect(screen.queryByRole("button", { name: /settings|close/i })).toBeNull();
+});
+
+test("the theme dropdown is on screen with the token field and defaults to general conversation", async () => {
+  render(<App />);
+
+  const theme = (await screen.findByLabelText("Тема")) as HTMLSelectElement;
+  expect(theme.value).toBe("general");
+  expect(screen.getByRole("option", { name: "Общая беседа" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "Тренер интеллектуальных игр" })).toBeTruthy();
+});
+
+test("a new conversation sends the theme chosen in settings", async () => {
+  stored = "vibe_test";
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /start conversation/i }));
+  await waitFor(() => expect(createdPrompts).toEqual([GENERAL_PROMPT]));
+  expect(createdThemes, "the theme picks the agent and its knowledge").toEqual(["general"]);
+
+  cleanup();
+  createdPrompts = [];
+  createdThemes = [];
+  createdDeps = [];
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /settings/i }));
+  fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "coach" } });
+  fireEvent.click(screen.getByRole("button", { name: /start conversation/i }));
+
+  await waitFor(() => expect(createdPrompts).toEqual([coachPrompt("school")]));
+  expect(createdThemes).toEqual(["coach"]);
+  expect(createdDeps[0]).toMatchObject({ llm: "claude-sonnet-5-5", language: "ru" });
+});
+
+test("the audience choice belongs to the coach and reaches its prompt", async () => {
+  stored = "vibe_test";
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /settings/i }));
+  expect(screen.queryByLabelText("Аудитория"), "the general role has no audience").toBeNull();
+
+  fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "coach" } });
+  fireEvent.change(screen.getByLabelText("Аудитория"), { target: { value: "students" } });
+  fireEvent.click(screen.getByRole("button", { name: /start conversation/i }));
+
+  await waitFor(() => expect(createdPrompts).toEqual([coachPrompt("students")]));
+});
+
+test("the coach starts with site questions in its prompt, and the tool skips them", async () => {
+  stored = "vibe_test";
+  vi.mocked(globalThis.fetch).mockImplementation(async (url) => {
+    if (!String(url).endsWith("/question")) return new Response("{}", { status: 404 });
+    const q = { id: 77, text: "ИХ зажигают на торте. Назовите ИХ.", answer: "Свечи", zachet: null, comment: null };
+    return new Response(JSON.stringify(q), { status: 200 });
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: /settings/i }));
+  fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "coach" } });
+  fireEvent.click(screen.getByRole("button", { name: /start conversation/i }));
+  await waitFor(() => expect(createdDeps).toHaveLength(1));
+
+  expect(createdPrompts[0]).toContain("Text: ИХ зажигают на торте. Назовите ИХ.\nAnswer: Свечи");
+  const [tool] = createdDeps[0].functions as ClientFunction[];
+  const fetchSpy = vi.mocked(globalThis.fetch);
+  fetchSpy.mockClear();
+  await tool.run({ skill: "any" });
+  expect(JSON.parse(String(fetchSpy.mock.calls[0][1]?.body)).exclude).toEqual([77]);
+});
+
+test("only the coach gets the training-question tool, and it draws for the audience chosen", async () => {
+  stored = "vibe_test";
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: /start conversation/i }));
+  await waitFor(() => expect(createdDeps).toHaveLength(1));
+  expect(createdDeps[0].functions, "general conversation has no tools").toBeUndefined();
+  expect(createdDeps[0].knowledgeFor, "nor the coach's knowledge").toBeUndefined();
+
+  cleanup();
+  createdDeps = [];
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: /settings/i }));
+  fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "coach" } });
+  fireEvent.change(screen.getByLabelText("Аудитория"), { target: { value: "students" } });
+  fireEvent.click(screen.getByRole("button", { name: /start conversation/i }));
+  await waitFor(() => expect(createdDeps).toHaveLength(1));
+
+  const [tool] = createdDeps[0].functions as ClientFunction[];
+  expect(tool.name).toBe("find_training_question");
+  const knowledgeFor = createdDeps[0].knowledgeFor as (words: string) => string | null;
+  expect(knowledgeFor("Что такое фальстарт в брейн-ринге?")).toContain("## Брейн-ринг: фальстарт");
+  const fetchSpy = vi.mocked(globalThis.fetch);
+  fetchSpy.mockClear();
+  await tool.run({ skill: "replacement" });
+  const [url, init] = fetchSpy.mock.calls[0];
+  expect(String(url)).toMatch(/\/question$/);
+  expect(JSON.parse(String(init?.body))).toMatchObject({ skill: "replacement", audience: "students" });
+});
+
+test("changing the theme during a conversation does not end it", async () => {
+  stored = "vibe_test";
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /start conversation/i }));
+  await screen.findByRole("button", { name: /end conversation/i });
+  const stops = stopCount;
+
+  fireEvent.click(screen.getByRole("button", { name: /settings/i }));
+  fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "coach" } });
+
+  expect(stopCount).toBe(stops);
+  expect(screen.getByRole("button", { name: /end conversation/i })).toBeTruthy();
 });
 
 test("saving a token closes the drawer instead of leaving it on 'close'", async () => {

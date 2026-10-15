@@ -26,6 +26,28 @@ Needs two repository secrets:
 The provider keys (`ELEVENLABS_API_KEY`, `DEEPGRAM_API_KEY`, `ADMIN_TOKEN`) are bound to the
 Worker with `wrangler secret put` and are untouched by a deploy, so they never pass through
 CI. `AGENT_ID` is plain `[vars]` — a session token is still required, so it is not a secret.
+`COACH_AGENT_ID`, the coach theme's agent with its knowledge base, goes there too. Like
+`AGENT_ID` it has to allow the prompt override — and, for the coach, the LLM and language
+overrides — and send `vad_score` and
+`asr_initiation_metadata` in its client events, or the conversation drops and the lanes go
+blank ([pipeline](pipeline.md)).
+
+The coach's agent also needs the client tool the prompt calls, `FIND_TRAINING_QUESTION` in
+[`trainingQuestion.ts`](../src/lib/trainingQuestion.ts), with **Wait for response** on. The
+name has to match exactly: the SDK finds the handler by it.
+
+`npm run dev:local` does all of this with `ELEVENLABS_API_KEY` from `worker/.dev.vars`:
+it creates or updates the tool, uploads changed knowledge files, creates the coach's agent
+from `AGENT_ID` when `COACH_AGENT_ID` is unset (and writes the id into `wrangler.toml`),
+allows the coach's overrides, then runs the Worker on :8787 and the page against it with
+the local key `vibe_dev` filled in. What the agent is set to:
+[`scripts/coachAgent.mjs`](../scripts/coachAgent.mjs).
+
+With only an interview key, `VIBE_TOKEN=vibe_...` in `worker/.dev.vars`, the agent is left
+alone: the dev server proxies `/voice-lab/worker/question` to the local Worker and
+everything else to the deployed one, so the session is minted as on the published page and
+the questions arrive in the prompt. No agent RAG and no tool in that mode; the page's own
+search of the knowledge base still runs ([knowledge](knowledge.md)).
 
 ## Interview keys
 

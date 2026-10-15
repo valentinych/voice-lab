@@ -176,6 +176,84 @@ describe("minting a session token", () => {
   });
 });
 
+describe("choosing the agent by theme", () => {
+  const mint = (body, e) =>
+    worker.fetch(req("/agent/token", { headers: { "x-vibe-token": "vibe_el" }, body }), e);
+  const askedFor = (fetchSpy) => new URL(String(fetchSpy.mock.calls[0][0])).searchParams.get("agent_id");
+
+  it("mints for the coach's own agent, where its knowledge base lives", async () => {
+    const fetchSpy = stubElevenLabs();
+    const r = await mint({ theme: "coach" }, env({ COACH_AGENT_ID: "agent_coach" }));
+    expect(askedFor(fetchSpy)).toBe("agent_coach");
+    expect((await r.json()).agentId).toBe("agent_coach");
+  });
+
+  it("keeps the coach on the shared agent until one of its own is configured", async () => {
+    const fetchSpy = stubElevenLabs();
+    await mint({ theme: "coach" }, env());
+    expect(askedFor(fetchSpy)).toBe("agent_test");
+  });
+
+  it("keeps general conversation, an unknown theme and an older page on the shared agent", async () => {
+    const e = env({ COACH_AGENT_ID: "agent_coach" });
+    for (const body of [{ theme: "general" }, { theme: "toString" }, undefined]) {
+      const fetchSpy = stubElevenLabs();
+      await mint(body, e);
+      expect(askedFor(fetchSpy), JSON.stringify(body)).toBe("agent_test");
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+describe("drawing a training question", () => {
+  const page = (question) =>
+    `<script>self.__next_f.push([1,${JSON.stringify(`5:${JSON.stringify([question])}\n`)}])</script>`;
+  const stubPack = (status = 200) =>
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(
+          page({ id: 7, number: 1, text: "Назовите ИКСА.", answer: "Плот", comment: "", complexity: [] }),
+          { status },
+        ),
+    );
+  const draw = (body, headers = { "x-vibe-token": "vibe_el" }, e = env()) =>
+    worker.fetch(req("/question", { headers, body }), e);
+
+  it("hands a key holder on either engine a question from gotquestions.online", async () => {
+    stubPack();
+    for (const token of ["vibe_el", "vibe_dg"]) {
+      const r = await draw({ skill: "replacement", audience: "school" }, { "x-vibe-token": token });
+      expect(r.status, token).toBe(200);
+      expect(await r.json()).toMatchObject({ id: 7, answer: "Плот" });
+    }
+  });
+
+  it("refuses without a live key before touching the site", async () => {
+    const fetchSpy = stubPack();
+    const r = await draw({ audience: "school" }, { "x-vibe-token": "vibe_gone" });
+    expect(r.status).toBe(401);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("counts against its own per-key budget, not the one for minting", async () => {
+    stubPack();
+    const limiter = fakeLimiter(10);
+    await draw({ audience: "school" }, undefined, env({ TOKEN_KEY_LIMIT: limiter }));
+    expect([...limiter.counts.keys()]).toEqual([`question:${await sha256("vibe_el")}`]);
+  });
+
+  it("tells an unknown audience, an empty draw and a failing site apart", async () => {
+    stubPack();
+    expect((await draw({ audience: "toString" })).status).toBe(400);
+    const empty = await draw({ audience: "school", exclude: [7] });
+    expect(empty.status, "a 404 would look like a Worker without the route").toBe(200);
+    expect(await empty.json()).toBeNull();
+    vi.restoreAllMocks();
+    stubPack(429);
+    expect((await draw({ audience: "school" })).status).toBe(502);
+  });
+});
+
 /** Deepgram's grant endpoint; records how it was called. */
 function stubDeepgram(status = 200) {
   return vi.spyOn(globalThis, "fetch").mockResolvedValue(

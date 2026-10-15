@@ -1,6 +1,5 @@
 import { Conversation } from "@elevenlabs/client";
 import { Desmoother } from "../mouthLevel";
-import { SYSTEM_PROMPT } from "../persona";
 import type { StageName, TurnMetrics } from "../types";
 import type { SessionDeps, VoiceSession } from "./session";
 
@@ -84,14 +83,30 @@ export class AgentSession implements VoiceSession {
   async start(): Promise<void> {
     if (this.running) return;
 
-    const { token } = await this.deps.transport.agentToken();
+    const { token } = await this.deps.transport.agentToken(this.deps.theme);
     this.resetTurn();
 
     this.conversation = await Conversation.startSession({
       conversationToken: token,
 
-      // The role travels with the handshake: the server applies it only at start.
-      overrides: { agent: { prompt: { prompt: SYSTEM_PROMPT } } },
+      // The role travels with the handshake: the server applies it only at start. An agent
+      // that does not allow the model or language override drops the call, so unset means unsent.
+      overrides: {
+        agent: {
+          prompt: { prompt: this.deps.prompt, ...(this.deps.llm ? { llm: this.deps.llm } : {}) },
+          ...(this.deps.language ? { language: this.deps.language } : {}),
+        },
+        ...(this.deps.asrKeywords ? { asr: { keywords: this.deps.asrKeywords } } : {}),
+      },
+
+      // The SDK looks tools up with hasOwnProperty, so an explicit undefined would throw.
+      ...(this.deps.functions
+        ? {
+            clientTools: Object.fromEntries(
+              this.deps.functions.map((f) => [f.name, (params: Record<string, unknown>) => f.run(params ?? {})]),
+            ),
+          }
+        : {}),
 
       onModeChange: ({ mode }) => {
         // `Mode` is only "speaking" | "listening" — there is no third value, so the model's
@@ -130,6 +145,9 @@ export class AgentSession implements VoiceSession {
             type: "stt-result",
             result: { text: message, words: [] },
           });
+          // One context id: each update replaces the last in the model's view instead of piling up.
+          const material = this.deps.knowledgeFor?.(message);
+          if (material) this.conversation?.sendContextualUpdate(material, { contextId: "knowledge" });
           return;
         }
 

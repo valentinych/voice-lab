@@ -1,4 +1,20 @@
+import type { AudienceId, ThemeId } from "./persona";
 import type { Engine } from "./pipeline/session";
+
+/** The thinking move a training question should exercise. */
+export type QuestionSkill = "replacement" | "homogeneous" | "any";
+
+/** A question from gotquestions.online, as the Worker picked it. */
+export interface TrainingQuestion {
+  id: number;
+  text: string;
+  answer: string;
+  zachet: string | null;
+  comment: string | null;
+  /** Share of teams that took it, or null when it has not been played. */
+  takePercent: number | null;
+  url: string;
+}
 
 export interface TransportConfig {
   workerUrl: string;
@@ -11,12 +27,21 @@ export interface LlmMessage {
 }
 
 export interface Transport {
-  /** Session token for ElevenLabs Agents; the API key stays in the Worker. */
-  agentToken(): Promise<{ token: string; agentId: string }>;
+  /** Session token for the theme's ElevenLabs agent; the API key stays in the Worker. */
+  agentToken(theme: ThemeId): Promise<{ token: string; agentId: string }>;
   /** Short-lived Deepgram grant; it only has to be valid while the socket opens. */
   deepgramToken(): Promise<{ token: string }>;
   /** Which engine this key was set to in the admin page. */
   engine(): Promise<Engine>;
+  /**
+   * A question for the skill and audience, or null when none of the packs tried fits. A
+   * Worker without the route answers 404 and throws, rather than passing for an empty draw.
+   */
+  trainingQuestion(request: {
+    skill: QuestionSkill;
+    audience: AudienceId;
+    exclude: number[];
+  }): Promise<TrainingQuestion | null>;
 }
 
 type FetchLike = typeof fetch;
@@ -46,8 +71,8 @@ export function createTransport(cfg: TransportConfig, fetchImpl: FetchLike = fet
 
   return {
     /** Session token for ElevenLabs Agents, minted by the Worker. */
-    agentToken: async () => {
-      const r = await post("/agent/token");
+    agentToken: async (theme) => {
+      const r = await post("/agent/token", { theme });
       return (await r.json()) as { token: string; agentId: string };
     },
 
@@ -60,6 +85,11 @@ export function createTransport(cfg: TransportConfig, fetchImpl: FetchLike = fet
       const r = await post("/engine");
       const { engine } = (await r.json()) as { engine?: string };
       return engine === "deepgram" ? "deepgram" : "elevenlabs";
+    },
+
+    trainingQuestion: async (request) => {
+      const r = await post("/question", request);
+      return (await r.json()) as TrainingQuestion | null;
     },
   };
 }

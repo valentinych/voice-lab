@@ -3,6 +3,8 @@ import {
   clientIp, withinLimit, sha256,
 } from "./signin.js";
 
+import { findQuestion, POOLS, SKILLS } from "./questions.js";
+
 export { AddressGuard } from "./guard.js";
 
 /**
@@ -76,6 +78,16 @@ async function caller(token, env) {
 
 /** Which engine each paid endpoint spends, so a key only reaches the one it is set to. */
 const ENDPOINT_ENGINE = { "/agent/token": "elevenlabs", "/deepgram-token": "deepgram" };
+
+/**
+ * A knowledge base belongs to an agent, not to the prompt the page overrides, so a theme
+ * with knowledge of its own needs an agent of its own. Unset falls back to AGENT_ID.
+ */
+const THEME_AGENT_VAR = { coach: "COACH_AGENT_ID" };
+
+function agentFor(theme, env) {
+  return (Object.hasOwn(THEME_AGENT_VAR, theme) && env[THEME_AGENT_VAR[theme]]) || env.AGENT_ID;
+}
 
 /**
  * The shared password, kept for one job only: seeding the allowlist when it is empty,
@@ -224,7 +236,8 @@ export default {
     }
 
     if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
-    if (path !== "/engine" && !Object.hasOwn(ENDPOINT_ENGINE, path)) return json({ error: "not found" }, 404);
+    const keyed = path === "/engine" || path === "/question" || Object.hasOwn(ENDPOINT_ENGINE, path);
+    if (!keyed) return json({ error: "not found" }, 404);
 
     // The address limit comes first so guessing keys costs a stranger as much as using one.
     if (!(await withinLimit(env.TOKEN_IP_LIMIT, clientIp(req)))) {
@@ -234,7 +247,8 @@ export default {
     const who = await caller(token, env);
     if (!who) return json({ error: "nope" }, 401);
     // Hashed so the limiter never holds a live credential; minting shares one budget.
-    const bucket = `${path === "/engine" ? "engine" : "mint"}:${await sha256(token)}`;
+    const kind = path === "/engine" || path === "/question" ? path.slice(1) : "mint";
+    const bucket = `${kind}:${await sha256(token)}`;
     // Before the key's budget, so a request the key could never make does not spend it.
     if (ENDPOINT_ENGINE[path] && ENDPOINT_ENGINE[path] !== who.engine) {
       return json({ error: "key is set to another engine" }, 403);
@@ -246,16 +260,31 @@ export default {
     // Asked before every conversation, so a switch in the admin page applies to the next one.
     if (path === "/engine") return json({ engine: who.engine });
 
+    if (path === "/question") {
+      const asked = await req.json().catch(() => ({}));
+      const skill = Object.hasOwn(SKILLS, asked?.skill) ? asked.skill : "any";
+      if (!Object.hasOwn(POOLS, asked?.audience)) return json({ error: "unknown audience" }, 400);
+      const exclude = Array.isArray(asked.exclude) ? asked.exclude.filter(Number.isInteger).slice(0, 500) : [];
+      try {
+        // No fit is a 200 with null: a 404 here would read the same as a Worker without the route.
+        return json(await findQuestion({ skill, audience: asked.audience, exclude }));
+      } catch {
+        return json({ error: "question source failed" }, 502);
+      }
+    }
+
     // Session token for ElevenLabs Agents: short-lived and scoped to one conversation, so
     // it can safely reach the browser. The API key never leaves the Worker.
     if (path === "/agent/token") {
+      const asked = await req.json().catch(() => ({}));
+      const agentId = agentFor(asked?.theme, env);
       const r = await fetch(
-        `https://api.elevenlabs.io/v1/convai/conversation/token?agent_id=${env.AGENT_ID}`,
+        `https://api.elevenlabs.io/v1/convai/conversation/token?agent_id=${agentId}`,
         { headers: { "xi-api-key": env.ELEVENLABS_API_KEY } },
       );
       if (!r.ok) return json({ error: "upstream failed", status: r.status }, 502);
       const body = await r.json();
-      return json({ token: body.token, agentId: env.AGENT_ID });
+      return json({ token: body.token, agentId });
     }
 
     // Deepgram's grant lives 30 seconds and is only checked when the socket opens, so it
