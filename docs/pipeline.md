@@ -64,6 +64,11 @@ role it opened with, so switching roles means a new session. And the agent must 
 override: with it disallowed the server closes the connection instead of ignoring the
 field, which reaches the page as a dropped conversation rather than an error about prompts.
 
+Each theme is a role in `persona.ts`: the prompt, plus — for the coach — the model
+(`prompt.llm`) and the language. A field the role leaves unset is not sent, because the
+model and the language drop the connection like the prompt does when the agent does not
+allow them. So `AGENT_ID` must allow the prompt, LLM and language overrides.
+
 ## Backup engine: Deepgram
 
 When ElevenLabs is down, a key can be switched to [Deepgram's Voice Agent

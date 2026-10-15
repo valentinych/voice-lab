@@ -1,6 +1,5 @@
 import { expect, test, vi } from "vitest";
 import { AgentSession } from "./agentSession";
-import { SYSTEM_PROMPT } from "../persona";
 import { EventBus } from "../events";
 import type { PipelineEvent, TurnMetrics } from "../types";
 
@@ -25,7 +24,7 @@ vi.mock("@elevenlabs/client", () => ({
   },
 }));
 
-async function harness() {
+async function harness(prompt = "unused") {
   const bus = new EventBus();
   const events: PipelineEvent[] = [];
   bus.on((e) => events.push(e));
@@ -37,6 +36,7 @@ async function harness() {
     transport: { agentToken: async () => ({ token: "t", agentId: "a" }) } as never,
     onTurn: (m) => turns.push(m),
     onEnded: () => {},
+    prompt,
   });
 
   await session.start();
@@ -90,11 +90,34 @@ test("a disconnect closes every open lane", async () => {
   expect(closed).toContain("playback");
 });
 
-test("the role is sent with the handshake, not left to the agent's own prompt", async () => {
-  await harness();
+test("the handshake sends the prompt the session was given", async () => {
+  await harness("theme for this start");
 
   const overrides = startOptions.overrides as
     | { agent?: { prompt?: { prompt?: string } } }
     | undefined;
-  expect(overrides?.agent?.prompt?.prompt).toBe(SYSTEM_PROMPT);
+  expect(overrides?.agent?.prompt?.prompt).toBe("theme for this start");
+});
+
+test("the handshake sends the role's model and language", async () => {
+  const session = new AgentSession({
+    bus: new EventBus(),
+    transport: { agentToken: async () => ({ token: "t", agentId: "a" }) } as never,
+    onTurn: () => {},
+    onEnded: () => {},
+    prompt: "coach",
+    llm: "claude-sonnet-5-5",
+    language: "ru",
+  });
+  await session.start();
+
+  expect(startOptions.overrides).toEqual({
+    agent: { prompt: { prompt: "coach", llm: "claude-sonnet-5-5" }, language: "ru" },
+  });
+});
+
+test("a role without a model or language sends neither, so an agent that forbids them still connects", async () => {
+  await harness("general");
+
+  expect(startOptions.overrides).toEqual({ agent: { prompt: { prompt: "general" } } });
 });
